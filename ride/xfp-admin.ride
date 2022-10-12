@@ -1,0 +1,152 @@
+{-# STDLIB_VERSION 5 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+
+let staker = "staker"
+let admin = "admin_"
+let assetIdCall = "Asset ID"
+let daysLeft = "days_left_to_claim"
+
+let entryIndex = "_Entry_Index"
+let APY_Amount = "_APY_Amount"
+func getI(key: String) = getInteger(this, key)
+func getS(key: String) = getString(this, key)
+func getIV(key: String) = getInteger(this, key).value()
+func getSV(key: String) = getString(this, key).value()
+func throwIf(condition: Boolean, error: String) = if condition then throw(error) else true
+
+
+let thirtyDaysLockPeriod  = 30 
+let sixtyDaysLockPeriod = 60 
+let ninetyDaysLockPeriod = 90
+
+func throwOrReturnI(val: Int | Unit, error: String) = {
+    match val {
+        case val: Int => val
+        case _ => throw(error)
+    }
+} 
+
+func throwOrReturnS(val: String | Unit, error: String) = {
+    match val {
+        case val: String => val
+        case _ => throw(error)
+    }
+}
+
+func writeInt(key: String, value: Int) =
+    if(value < 0)
+        then throw("writing negative value " + value.toString() + " for key " + key)
+    else IntegerEntry(key, value)
+
+func writeStr(key: String, value: String) =  
+    if (" " ==  value)
+        then throw("writing an empty string " + value)
+    else StringEntry(key, value)
+
+
+
+func writeConstString (key:String, value:String) = if (!(isDefined(getS(key))))
+    then writeStr(key, value)
+    else throw(("already initialized: " + key))
+
+func writeConstInteger (key:String, value:Int) = if (!(isDefined(getS(key))))
+    then writeInt(key, value)
+    else throw(("already initialized: " + key))
+
+func adminOnly (i: Invocation) = {
+    let inputAddress = toBase58String(i.caller.bytes) 
+    let otherAdmin = admin + inputAddress
+
+    match getS(admin) {
+        case a: String => if (inputAddress != getS(admin)) then throw("unauthorized") else true
+        case _ => match getS(otherAdmin) {
+            case b: String => if (inputAddress != getS(otherAdmin)) then throw("unauthorized") else true
+            case _ => throw("unauthorizd")
+        }
+    }
+}
+
+
+func stakerOnly(i: Invocation) = {
+    let inputAddress = toBase58String(i.caller.bytes)
+    let check = if (inputAddress != getS(staker)) then throw("unauthorized") else true
+    check
+}
+
+func writeConfigValue(key: String, data: String | Int) = {
+    match data {
+        case data: String => key.writeConstString(data)
+        case data: Int => key.writeConstInteger(data)
+        case _ => throw("unsupported config type")
+    }
+}
+
+func incrementEntryIndex(key:String) = {
+    let uIndex = getI(key)
+    if(isDefined(uIndex)) 
+        then (uIndex.value() + 1)
+    else (0)
+}
+
+
+@Callable(i)
+func getAPYAmount(user: String, AssetTicker: String, EntryIndex:Int) = {
+    strict check = stakerOnly(i)
+    let uEntryToString = user + "_" + AssetTicker + "_" + toString(EntryIndex)
+    let uAPY = uEntryToString + APY_Amount
+    let uAPYAmount = valueOrErrorMessage(getI(uAPY), "APY not computed for " + user)
+    ([], uAPYAmount)
+
+}
+
+@Callable(i)
+func storeAPYAmount(user: String, AssetTicker: String, APYAmount: Int, EntryIndex: Int) = {
+    strict check = adminOnly(i)
+    let uEntryToString = user + "_" + AssetTicker + "_" + toString(EntryIndex)
+    let uAPY = uEntryToString + APY_Amount
+
+    [ uEntryToString.writeConstInteger(EntryIndex), uAPY.writeConstInteger(APYAmount) ]
+}
+
+@Callable(i)
+func deleteAPYAmount(user: String, AssetTicker: String,  EntryIndex: Int) = {
+    strict check = adminOnly(i)
+    let uEntryToString = user + "_" + AssetTicker + "_" + toString(EntryIndex)
+    let uAPY = uEntryToString + APY_Amount
+    [DeleteEntry(uAPY), DeleteEntry(uEntryToString)]
+}
+
+@Callable(i)
+func init(stakerAddress: String) = {
+  [
+    staker.writeConstString(stakerAddress),
+    admin.writeConstString(toBase58String(this.bytes))
+  ]
+}
+
+@Callable(i)
+func getAssetIdByTicker(AssetTicker: String) = { 
+  strict checks = adminOnly(i) 
+  let stakerAddress = fromBase58String(getSV("staker"))             
+  let run = invoke(Address(stakerAddress), "_getAssetIdByTicker", [AssetTicker], [])
+    
+  match run{
+      case a: String => [StringEntry(assetIdCall, a)]
+      case _ => []
+  }
+
+}
+
+@Callable(i)
+func getDaysLeftToClaim(userAddress: String, AssetTicker: String, EntryIndex: Int) = {
+    strict checks = adminOnly(i)
+    let stakerAddress = fromBase58String(getSV("staker"))             
+  let run = invoke(Address(stakerAddress), "_getDaysLeftToClaim", [userAddress, AssetTicker, EntryIndex], [])
+    
+  match run{
+      case a: Int => [IntegerEntry(daysLeft, a)]
+      case _ => []
+  }
+}

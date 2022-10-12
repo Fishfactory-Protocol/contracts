@@ -1,0 +1,360 @@
+{-# STDLIB_VERSION 5 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+#config per Token
+let lockingStore = this
+let stakingStore = "_Reserve"
+let minimumLockAmount = "_MinLockAmount"
+let maximumLockAmount = "_MaxLockAmount"
+
+#Internal
+let assetList = []
+let unlockEligibility = "_Eligible_to_unlock_at_timestamp"
+let lockedAmount = "_Amount_locked"
+let lockedAsset = "_Asset_locked"
+let user = "_User"
+let APY_Amount  = "_APY_amount"
+let totalLockedAMount = "_Total_Locked_Amount"
+let lockingPeriod = "_Days_locked"
+let entryIndex = "_Entry_Index"
+let alreadyClaimed = "_Already_Claimed"
+let admin = "admin_" 
+
+
+
+
+# USING BLOCK TIMESTAMP
+let miliSecPerDay = 86400000 # Total number of miliseconds in a day  
+let sixHoursInMiliSec = 21600000 # 6 * 3600 * 1000 
+let sevenDaysLockPeriod = 7 
+let fourteenDaysLockPeriod = 14 
+let thirtyDaysLockPeriod = 30 
+let sixtyDaysLockPeriod = 60 
+let ninetyDaysLockPeriod = 90 
+
+
+
+
+func getI(key: String) = getInteger(this, key)
+func getS(key: String) = getString(this, key)
+func getIV(key: String) = getInteger(this, key).value()
+func getSV(key: String) = getString(this, key).value()
+func throwIf(condition: Boolean, error: String) = if condition then throw(error) else true
+
+func throwOrReturnI(val: Int | Unit, error: String) = {
+    match val {
+        case val: Int => val
+        case _ => throw(error)
+    }
+} 
+
+func throwOrReturnS(val: String | Unit, error: String) = {
+    match val {
+        case val: String => val
+        case _ => throw(error)
+    }
+}
+
+func writeInt(key: String, value: Int) =
+    if(value < 0)
+        then throw("writing negative value " + value.toString() + " for key " + key)
+    else IntegerEntry(key, value)
+
+func writeStr(key: String, value: String) =  
+    if (" " ==  value)
+        then throw("writing an empty string " + value)
+    else StringEntry(key, value)
+
+# Use block forging to compute the number of days.
+func daysToMiliSec(days: Int) = {
+            if (days != sevenDaysLockPeriod)
+                then
+                    if (days != fourteenDaysLockPeriod)
+                        then
+                            if (days != thirtyDaysLockPeriod) 
+                                then  
+                                    if (days != sixtyDaysLockPeriod) 
+                                        then 
+                                        if (days != ninetyDaysLockPeriod)
+                                            then
+                                            throw("invalid locking period")
+                                        else ((days  * miliSecPerDay) + sixHoursInMiliSec + lastBlock.timestamp)
+                                    else ((days  * miliSecPerDay) + sixHoursInMiliSec + lastBlock.timestamp)
+                            else ((days  * miliSecPerDay) + sixHoursInMiliSec + lastBlock.timestamp)
+                    else ((days  * miliSecPerDay) + sixHoursInMiliSec + lastBlock.timestamp)
+            else ((days  * miliSecPerDay) + sixHoursInMiliSec + lastBlock.timestamp)
+}
+
+
+#func blocksToDays(blocksLeft: Int) = {
+#    if (blocksLeft <= 0 ) 
+#        then (0) 
+#    else {
+#        let daysleft = fraction(blocksLeft, 1000,  BlockPerDay, CEILING  )
+#        (daysleft)
+#    }
+#}
+
+
+
+func writeConstString (key:String, value:String) = if (!(isDefined(getS(key))))
+    then writeStr(key, value)
+    else throw((" entry already initialized: " + key))
+
+func writeConstInteger (key:String, value:Int) = if (!(isDefined(getS(key))))
+    then writeInt(key, value)
+    else throw((" entry already initialized: " + key))
+
+func adminOnly (i: Invocation) = {
+    let inputAddress = toBase58String(i.caller.bytes) 
+    let otherAdmin = admin + inputAddress
+
+    match getS(admin) {
+        case a: String => if (inputAddress != getS(admin)) then throw("unauthorized") else true
+        case _ => match getS(otherAdmin) {
+            case b: String => if (inputAddress != getS(otherAdmin)) then throw("unauthorized") else true
+            case _ => throw("unauthorizd")
+        }
+    }
+}
+
+func writeConfigValue(key: String, data: String | Int) = {
+    match data {
+        case data: String => key.writeConstString(data)
+        case data: Int => key.writeConstInteger(data)
+        case _ => throw("unsupported config type")
+    }
+}
+
+func incrementEntryIndex(key:String) = {
+    let uIndex = getI(key)
+    if(isDefined(uIndex)) 
+        then (uIndex.value() + 1)
+    else (0)
+}
+
+@Callable(i)
+func addAsset(AssetTicker: String, AssetID: String, AssetReserve: String,
+                AssetMinimumLockAmount: Int, AssetMaximumLockAmount: Int) = {
+    strict check = adminOnly(i)
+    let aStakingStore = AssetTicker + stakingStore
+    let aMinimumLockAmount = AssetTicker + minimumLockAmount
+    let aMaximumLockAmount = AssetTicker + maximumLockAmount
+    let checkMinMax = {
+        if (AssetMinimumLockAmount < AssetMaximumLockAmount) 
+            then
+                [aMinimumLockAmount.writeConstInteger(AssetMinimumLockAmount),
+                aMaximumLockAmount.writeConstInteger(AssetMaximumLockAmount)]
+        else
+                [aMinimumLockAmount.writeConstInteger(AssetMaximumLockAmount),
+                aMaximumLockAmount.writeConstInteger( AssetMinimumLockAmount)]
+    }
+    
+    
+    [AssetTicker.writeConstString(AssetID), aStakingStore.writeConstString(AssetReserve)] ++ checkMinMax 
+}
+
+@Callable(i)
+func deleteAsset(AssetTicker: String) = {
+    strict check = adminOnly(i)
+    strict assetID = throwOrReturnS(getS(AssetTicker), "asset with ticker " + AssetTicker + " not found")
+    [
+        DeleteEntry(AssetTicker),
+        DeleteEntry(AssetTicker + minimumLockAmount),
+        DeleteEntry(AssetTicker + maximumLockAmount),
+        DeleteEntry(AssetTicker + stakingStore)
+    ]
+
+}
+
+@Callable(i)
+func _getAssetIdByTicker(AssetTicker: String) = {
+    strict check = adminOnly(i)
+    let a = throwOrReturnS(getS(AssetTicker), "asset not found")
+    ([], a)
+}
+
+@Callable(i)
+func init(AdminAddress: String) =  {
+    let adminAddr = valueOrErrorMessage(addressFromString(AdminAddress), "invalid address")
+    [admin.writeConstString(toString(adminAddr))] 
+}
+
+@Callable(i)
+func _deleteEntry(key: String) = {
+    strict check = adminOnly(i)
+    [DeleteEntry(key)]
+}
+@Callable(i)
+func addAdmin(AdminAddress: String) = {
+    strict check = adminOnly(i)
+    let adminAddr = valueOrErrorMessage(addressFromString(AdminAddress), "invalid address")
+    let newAdmin = admin + toString(adminAddr)
+    [newAdmin.writeConstString(AdminAddress)]
+}
+
+@Callable(i)
+func changeMainAdmin(newAddress: String) = {
+    strict checks = adminOnly(i)
+    let adminAddr = valueOrErrorMessage(addressFromString(newAddress), "invalid address")
+    strict del = DeleteEntry(admin)
+    [admin.writeConstString(toString(adminAddr))]
+}
+
+@Callable(i)
+func updateOtherAdminAddress(newAddress: String) = {
+    strict checks = adminOnly(i)
+    let adminAddr = valueOrErrorMessage(addressFromString(newAddress), "invalid address")
+    let caller = toString(i.caller) 
+    let otherAdmin = admin + caller
+    strict checkOldAddress = throwOrReturnS(getS(otherAdmin), "no previous address found")
+    strict delAddress = DeleteEntry(otherAdmin)
+    [otherAdmin.writeConstString(toString(adminAddr))] 
+}
+
+@Callable(i)
+func removeOtherAdmin(address: String) = {
+    strict checks = adminOnly(i)
+    let adminAddr = valueOrErrorMessage(addressFromString(address), "invalid address")
+    let otherAddress = admin + adminAddr.toString()
+    strict delAdmin = DeleteEntry(otherAddress)
+    []
+
+}
+
+@Callable(i)
+func updateConfigValue(key: String, data: String | Int) = {
+    strict checks = adminOnly(i)
+    strict del = DeleteEntry(key) 
+    [ key.writeConfigValue(data) ]
+}
+
+@Callable(i)
+func _getDaysLeftToClaim(userAddress: String, AssetTicker: String, EntryIndex: Int) = {
+  strict check0 = adminOnly(i)
+  strict check1 = valueOrErrorMessage(addressFromString(userAddress), "invalid address")
+  let uEntryIndex = "_" + AssetTicker + "_" + toString(EntryIndex)
+  let uUnlockEligibility = userAddress + uEntryIndex + unlockEligibility
+  let uDaysLeft = valueOrErrorMessage(getI(uUnlockEligibility), "no entry for " + userAddress) / 1000   
+  #let uBlocksToDays = blocksToDays(uBlocksLeft - height)
+  ([], uDaysLeft)
+}
+
+
+@Callable(i)
+func DeleteLockEntry(EntryIndex:Int, UserId:String, AssetTicker:String, Period:Int) = {
+    strict check = adminOnly(i)
+
+    let uEntryToString = EntryIndex.toString()
+
+    let uEntry = "_" + AssetTicker + "_" + uEntryToString
+
+    let uUserEntryKey = UserId + uEntry
+    let uLockingPeriod = UserId + uEntry + lockingPeriod
+    let uUnlockEligibility = UserId + uEntry + unlockEligibility
+    let uAPY = UserId + uEntry + APY_Amount
+    let uLockedAmount = UserId + uEntry + lockedAmount
+    let uAlreadyClaimed = UserId + uEntry + alreadyClaimed
+    let uTotalLocked = UserId + totalLockedAMount
+    let uLockedAsset = UserId + uEntry + lockedAsset
+
+    let newTotalLocked = getIV(uTotalLocked) - getIV(uLockedAmount)
+ 
+    #strict deleteAPY = invoke(Address(fromBase58String(getSV(admin))), "deleteAPYAmount", [UserId, AssetTicker, EntryIndex], [])
+
+    [
+        ScriptTransfer(addressFromStringValue(UserId), getIV(uLockedAmount), fromBase58String(getSV(uLockedAsset))),
+        uTotalLocked.writeConstInteger(newTotalLocked),
+        DeleteEntry(uUserEntryKey),
+        DeleteEntry(uLockingPeriod),
+        DeleteEntry(uUnlockEligibility),
+        DeleteEntry(uAPY),
+        DeleteEntry(uLockedAmount),
+        DeleteEntry(uAlreadyClaimed),
+        DeleteEntry(uLockedAsset)
+        
+    ]
+}
+
+@Callable(i)
+func Lock(LockPeriod: Int, AssetTicker: String, EntryIndex: Int) = {
+    strict check1 = throwIf(1 != size(i.payments), "attach amount you want to lock")
+    let assetValue = valueOrErrorMessage(i.payments[0].assetId, "no assetId for the attached asset")
+    let asset = toBase58String(assetValue)
+    strict check2 = throwIf(getS(AssetTicker) != asset, "asset not supported")
+    let lockPeriod = LockPeriod
+    let userId = toBase58String(i.caller.bytes)
+    let amountToStake =  i.payments[0].amount
+    let minToStake = throwOrReturnI(getI(AssetTicker + minimumLockAmount), "internal error: minimum stacking amount not specified")
+    let maxToStake = throwOrReturnI(getI(AssetTicker + maximumLockAmount), "internal error: maximum staking amount not specified")
+    strict check3 = throwIf((minToStake > amountToStake || amountToStake > maxToStake), "staking amount is out of range")
+    let uTotalLocked = userId + totalLockedAMount
+    let uSumTotal = if(!isDefined(getI(uTotalLocked))) then (amountToStake) else (amountToStake + getIV(uTotalLocked))
+    strict check4 = throwIf((maxToStake < uSumTotal), "you have maxed out your quota")
+
+    
+    let uEntryToString = EntryIndex.toString()
+
+    let uEntry =  "_" + AssetTicker + "_" + uEntryToString
+    let uUserEntryKey = userId + uEntry
+    let uUserId = userId + uEntry + user
+    let uAsset = userId + uEntry + lockedAsset
+    let uLockingPeriod = userId + uEntry + lockingPeriod
+    let uLockedAmount = userId + uEntry + lockedAmount
+    let uAPY = userId + uEntry + APY_Amount
+    let uUnlockEligibility = userId + uEntry + unlockEligibility
+    let uAlreadyClaimed = userId + uEntry + alreadyClaimed
+
+    let StoredAPY = invoke(Address(fromBase58String(getSV(admin))), "getAPYAmount", [userId, AssetTicker, EntryIndex], [])
+
+     let APY = match StoredAPY{
+        case c: Int => c
+        case _ => throw("could not get the APY amount for " + userId)
+    }
+     
+    [ 
+            uUserEntryKey.writeConstInteger(EntryIndex),
+            uUserId.writeConstString(userId),
+            uAsset.writeConstString(asset), 
+            uLockingPeriod.writeConstInteger(lockPeriod), 
+            uLockedAmount.writeConstInteger(i.payments[0].amount),
+            uTotalLocked.writeConstInteger(uSumTotal),
+            uUnlockEligibility.writeConstInteger(daysToMiliSec(LockPeriod)),
+            uAPY.writeConstInteger(APY),
+            uAlreadyClaimed.BooleanEntry(false)
+    ]
+}
+
+@Callable(i)
+func Claim(AssetTicker: String, EntryIndex: Int) = {
+    let currentTime = lastBlock.timestamp
+    let userId = toString(i.caller)
+    strict asset = valueOrErrorMessage(getS(AssetTicker), "invalid asset")
+    let uEntry = "_"  +  AssetTicker + "_" + toString(EntryIndex)
+    strict uUserID = valueOrErrorMessage(getS(userId + uEntry + user), "no entry found for user " + userId)
+    let uLockedAsset = valueOrErrorMessage(getS(userId + uEntry + lockedAsset), "asset not locked by user")
+    let uAlreadyClaimedKey = userId + uEntry + alreadyClaimed
+    strict check0 = throwIf((valueOrErrorMessage(getBoolean(uAlreadyClaimedKey), "cannot ascertain claimability") == true), "user + " + userId + " already claimed" ) 
+    let uLockedAmount = getIV(userId + uEntry + lockedAmount)
+    let stakingReserve = addressFromStringValue(throwOrReturnS(getS( AssetTicker + stakingStore), "internal error: no reserve found"))
+    let APYAMount = getIV(userId + uEntry + APY_Amount)
+    let period = getIV(userId + uEntry + unlockEligibility)
+    let daysLeft = if ((period - currentTime <= 0 )) then (0) else (period - currentTime)
+    #let daysLeft = blocksToDays(blocksLeft)
+    #strict check1 = throwIf((height < period),  toString(blocksLeft) + " blocks left to claim")
+    let timeleft = daysLeft / 1000
+    strict check1 = throwIf((currentTime < daysLeft), "time left to claim: " + toString(timeleft) + "secs" )
+    let uTotalLocked = userId + totalLockedAMount
+    let sumTotal = getI(uTotalLocked).value() - uLockedAmount
+    let sumTotalLeft = if (sumTotal <= 0) then (0) else sumTotal
+    strict transferAPYAmount = invoke(stakingReserve, "transferInterest", [userId, APYAMount, fromBase58String(uLockedAsset)], [])
+
+    [ 
+        ScriptTransfer(addressFromStringValue(userId), uLockedAmount, fromBase58String(uLockedAsset)), 
+        uTotalLocked.writeConstInteger(sumTotalLeft),
+        uAlreadyClaimedKey.BooleanEntry(true)
+    ]
+}
+
+

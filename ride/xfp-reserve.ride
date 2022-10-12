@@ -1,0 +1,68 @@
+{-# STDLIB_VERSION 5 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+let lockingStore = "staker"
+let admin = "admin"
+
+func getI(key: String) = getInteger(this, key)
+func getS(key: String) = getString(this, key)
+func getIV(key: String) = getInteger(this, key).value()
+func getSV(key: String) = getString(this, key).value()
+
+func writeInt(key: String, value: Int) =
+    if(value < 0)
+        then throw("writing negative value " + value.toString() + " for key " + key)
+    else IntegerEntry(key, value)
+
+func writeStr(key: String, value: String) =  
+    if (" " ==  value)
+        then throw("writing an empty string " + value)
+    else StringEntry(key, value)
+
+func writeConstString (key:String, value:String) = if (!(isDefined(getS(key))))
+    then writeStr(key, value)
+    else throw(("already initialized: " + key))
+
+func writeConstInteger (key:String, value:Int) = if (!(isDefined(getS(key))))
+    then writeInt(key, value)
+    else throw(("already initialized: " + key))
+
+func lockingStoreOnly (i: Invocation) = if ((toString(i.caller) != valueOrElse(getString(this, lockingStore), "no store address")))
+    then throw("only the staker contract can call this function")
+    else true
+
+func adminOnly (i: Invocation) = if ((toString(i.caller) != valueOrElse(getString(this, admin), "no admin defined")))
+    then throw("only an admin can call this function")
+    else true
+
+@Callable(i)
+func init(pLockingStore: String, pAdmin: String) = {
+    [
+        lockingStore.writeConstString(pLockingStore),
+        admin.writeConstString(pAdmin)
+    ]
+}
+
+@Callable(i)
+func removeLockingStore(address: String) = {
+    strict checks = adminOnly(i)
+    [lockingStore.DeleteEntry()]
+}
+
+@Callable(i)
+func updateLockingStore(address: String) = {
+    strict checks = adminOnly(i)
+    [
+        lockingStore.DeleteEntry(),
+        lockingStore.writeConstString(address)
+    ]
+}
+
+@Callable(i)
+func transferInterest(user: String, amount: Int, assetID: ByteVector) = {
+    strict checks = lockingStoreOnly(i)
+    [ScriptTransfer(addressFromStringValue(user), amount, assetID)]
+}
+
+
